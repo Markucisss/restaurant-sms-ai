@@ -1,9 +1,10 @@
 {
   "name": "restaurant-sms-ai",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Restaurant SMS AI assistant powered by Twilio and OpenAI",
+  "main": "server.js",
   "scripts": {
+    "start": "node server.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
