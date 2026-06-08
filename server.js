@@ -538,7 +538,7 @@ app.post("/sms", async (req, res) => {
         console.log(`[Cancellation] Reservation found`);
         await setPendingCancellation(from, reservation.id);
         console.log(`[Cancellation] Awaiting confirmation`);
-        const reply = `Vai tiešām vēlaties atcelt rezervāciju ${reservation.guests} cilvēkiem ${reservation.reservation_date} plkst. ${reservation.reservation_time} uz vārda ${reservation.customer_name}? Atbildiet JĀ vai NĒ.`;
+        const reply = "Atcelt? JA/NE";
         await addMessage(from, "user", incomingMessage);
         await addMessage(from, "assistant", reply);
         return sendTwiml(res, reply);

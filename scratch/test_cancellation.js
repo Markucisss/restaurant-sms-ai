@@ -63,7 +63,7 @@ async function runTests() {
     cancelCalledId = null;
 
     let reply = await sendSms("atcelt", "+37120000000");
-    assert.ok(reply.includes("Vai tiešām vēlaties atcelt rezervāciju 4 cilvēkiem 2026-08-04 plkst. 18:00 uz vārda Marko?"));
+    assert.strictEqual(reply, "Atcelt? JA/NE");
     console.log("  Step 1 PASS (prompt returned correctly)");
 
     reply = await sendSms("jā", "+37120000000");
@@ -90,7 +90,7 @@ async function runTests() {
     cancelCalledId = null;
 
     reply = await sendSms("cancel", "+37120000000");
-    assert.ok(reply.includes("Vai tiešām vēlaties atcelt rezervāciju 2 cilvēkiem 2026-08-10 plkst. 19:00 uz vārda Arturs?"));
+    assert.strictEqual(reply, "Atcelt? JA/NE");
     console.log("  Step 1 PASS (prompt returned correctly)");
 
     reply = await sendSms("nē", "+37120000000");
