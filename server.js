@@ -4,6 +4,7 @@ const express = require("express");
 const OpenAI = require("openai");
 const twilio = require("twilio");
 const { Redis } = require("@upstash/redis");
+const reservationService = require("./reservationService");
 
 const app = express();
 
@@ -68,23 +69,48 @@ function historyKey(phone) {
 async function getHistory(phone) {
   if (redis) {
     const stored = await redis.get(historyKey(phone));
-    return Array.isArray(stored) ? stored : [];
+    if (!stored) return [];
+    if (Array.isArray(stored)) return stored;
+    return Array.isArray(stored.history) ? stored.history : [];
   }
-  return memoryStore.get(phone) || [];
+  const stored = memoryStore.get(phone);
+  if (!stored) return [];
+  if (Array.isArray(stored)) return stored;
+  return Array.isArray(stored.history) ? stored.history : [];
 }
 
-async function saveHistory(phone, history) {
+async function isReservationSaved(phone) {
+  if (redis) {
+    const stored = await redis.get(historyKey(phone));
+    if (stored && !Array.isArray(stored)) {
+      return !!stored.reservation_saved;
+    }
+  } else {
+    const stored = memoryStore.get(phone);
+    if (stored && !Array.isArray(stored)) {
+      return !!stored.reservation_saved;
+    }
+  }
+  return false;
+}
+
+async function saveHistory(phone, history, reservation_saved = false) {
   const trimmed =
     history.length > MAX_HISTORY_MESSAGES
       ? history.slice(-MAX_HISTORY_MESSAGES)
       : history;
 
+  const data = {
+    history: trimmed,
+    reservation_saved
+  };
+
   if (redis) {
-    await redis.set(historyKey(phone), trimmed, {
+    await redis.set(historyKey(phone), data, {
       ex: CONVERSATION_TTL_SECONDS,
     });
   } else {
-    memoryStore.set(phone, trimmed);
+    memoryStore.set(phone, data);
   }
 
   return trimmed;
@@ -93,7 +119,77 @@ async function saveHistory(phone, history) {
 async function addMessage(phone, role, content) {
   const history = await getHistory(phone);
   history.push({ role, content });
-  return saveHistory(phone, history);
+  const saved = await isReservationSaved(phone);
+  return saveHistory(phone, history, saved);
+}
+
+async function markReservationSaved(phone) {
+  const history = await getHistory(phone);
+  return saveHistory(phone, history, true);
+}
+
+async function extractReservationDetails(history) {
+  if (!process.env.OPENAI_API_KEY) {
+    throw new Error("OPENAI_API_KEY is not configured.");
+  }
+
+  // Get current local time for date resolution context
+  const currentDateTime = new Date().toLocaleString("en-US", { timeZone: "Europe/Riga" });
+
+  const messages = [
+    {
+      role: "system",
+      content:
+        "Tev ir jāanalizē restorāna rezervācijas saruna un jānosaka, vai ir pilnībā savākta visa nepieciešamā informācija rezervācijai.\n" +
+        "Nepieciešamā informācija ir:\n" +
+        "1. Klienta vārds (customer_name) - jābūt tekstam.\n" +
+        "2. Cilvēku/viesu skaits (guests) - jābūt veselam skaitlim (integer).\n" +
+        "3. Rezervācijas datums (reservation_date) - jābūt DATE formātā: YYYY-MM-DD. Ja klients raksta relatīvu datumu (piem., 'rīt' vai 'piektdien') vai nepilnu datumu (piem., '4. augustā'), pārvērt to reālā datumā formātā YYYY-MM-DD, izmantojot sniegto pašreizējo datumu/laiku.\n" +
+        "4. Rezervācijas laiks (reservation_time) - jābūt TIME formātā: HH:MM (24 stundu formāts, piemēram, 18:00 vai 19:30).\n\n" +
+        "Šodienas pašreizējais datums un laiks kontekstam: " + currentDateTime + ".\n\n" +
+        "Svarīgi noteikumi:\n" +
+        "- Ja kāds no 4 parametriem trūkst vai klients vēl nav pabeidzis vai apstiprinājis rezervāciju sarunā (piem., asistents vēl nav apliecinājis, ka rezervācija ir pabeigta, vai klients vēl svārstās), laukam all_collected jābūt false un visiem pārējiem laukiem jābūt null.\n" +
+        "- Tikai tad, kad visi 4 parametri ir skaidri zināmi, all_collected ir true."
+    },
+    {
+      role: "user",
+      content: `Sarunas vēsture:\n${JSON.stringify(history, null, 2)}`
+    }
+  ];
+
+  const response = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages,
+    response_format: {
+      type: "json_schema",
+      json_schema: {
+        name: "reservation_extraction",
+        strict: true,
+        schema: {
+          type: "object",
+          properties: {
+            all_collected: { type: "boolean" },
+            customer_name: { type: ["string", "null"] },
+            guests: { type: ["integer", "null"] },
+            reservation_date: { type: ["string", "null"] },
+            reservation_time: { type: ["string", "null"] }
+          },
+          required: ["all_collected", "customer_name", "guests", "reservation_date", "reservation_time"],
+          additionalProperties: false
+        }
+      }
+    },
+    temperature: 0.0
+  });
+
+  try {
+    const content = response.choices[0]?.message?.content;
+    if (!content) return { all_collected: false };
+    return JSON.parse(content);
+  } catch (error) {
+    console.error("[Extractor] Failed to parse JSON response:", error);
+    return { all_collected: false };
+  }
 }
 
 function sendTwiml(res, message) {
@@ -185,6 +281,56 @@ app.post("/sms", async (req, res) => {
       `[POST /sms] Updated conversation history for ${from} (${historyAfter.length} messages):`
     );
     console.log(JSON.stringify(historyAfter, null, 2));
+
+    // Supabase Integration: Extract and save reservation info
+    try {
+      const saved = await isReservationSaved(from);
+      if (saved) {
+        console.log(`[Reservation] Skip extraction: Reservation already saved for ${from} in this conversation.`);
+      } else {
+        const extraction = await extractReservationDetails(historyAfter);
+        console.log("[Reservation] Extracted details:", extraction);
+
+        if (extraction && extraction.all_collected) {
+          const { customer_name, guests, reservation_date, reservation_time } = extraction;
+
+          // Double check that all 4 fields exist and are valid (not null/undefined/empty)
+          if (
+            customer_name != null &&
+            guests != null &&
+            reservation_date != null &&
+            reservation_time != null
+          ) {
+            console.log(`[Reservation] Creating reservation in database for name: ${customer_name}, phone: ${from}, guests: ${guests}, date: ${reservation_date}, time: ${reservation_time}...`);
+            
+            const result = await reservationService.createReservation({
+              phone_number: from,
+              customer_name,
+              guests,
+              reservation_date,
+              reservation_time
+            });
+
+            if (result.isNew) {
+              console.log(`[Reservation] Reservation created. ID: ${result.id}`);
+              console.log("[Reservation] Reservation data:", JSON.stringify(result.data, null, 2));
+            } else {
+              console.log(`[Reservation] Duplicate reservation detected. Existing ID: ${result.id}`);
+            }
+
+            // Mark reservation as saved in the conversation state
+            await markReservationSaved(from);
+            console.log(`[Reservation] Flagged reservation_saved = true for phone: ${from}`);
+          } else {
+            console.log("[Reservation] Extraction reported all_collected but missing required fields. Skipped saving.");
+          }
+        } else {
+          console.log("[Reservation] Reservation is not yet fully collected.");
+        }
+      }
+    } catch (dbError) {
+      console.error("[Reservation] Error in Supabase reservation flow:", dbError.message || dbError);
+    }
 
     sendTwiml(res, aiReply);
   } catch (error) {
