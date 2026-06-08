@@ -128,13 +128,205 @@ async function markReservationSaved(phone) {
   return saveHistory(phone, history, true);
 }
 
+function getRigaDateOffset(offsetDays = 0, baseDate = new Date()) {
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Europe/Riga',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  });
+  const parts = formatter.formatToParts(baseDate);
+  const year = parseInt(parts.find(p => p.type === 'year').value, 10);
+  const month = parseInt(parts.find(p => p.type === 'month').value, 10) - 1; // 0-indexed month
+  const day = parseInt(parts.find(p => p.type === 'day').value, 10);
+  
+  const localDate = new Date(year, month, day);
+  localDate.setDate(localDate.getDate() + offsetDays);
+  
+  const targetYear = localDate.getFullYear();
+  const targetMonth = String(localDate.getMonth() + 1).padStart(2, '0');
+  const targetDay = String(localDate.getDate()).padStart(2, '0');
+  
+  return `${targetYear}-${targetMonth}-${targetDay}`;
+}
+
+function getMonthFromLatvianName(name) {
+  const cleanName = name.toLowerCase().trim();
+  if (cleanName.startsWith("jan")) return 0;
+  if (cleanName.startsWith("feb")) return 1;
+  if (cleanName.startsWith("mar")) return 2;
+  if (cleanName.startsWith("apr")) return 3;
+  if (cleanName.startsWith("mai")) return 4;
+  if (cleanName.startsWith("jūn")) return 5;
+  if (cleanName.startsWith("jun")) return 5;
+  if (cleanName.startsWith("jūl")) return 6;
+  if (cleanName.startsWith("jul")) return 6;
+  if (cleanName.startsWith("aug")) return 7;
+  if (cleanName.startsWith("sep")) return 8;
+  if (cleanName.startsWith("okt")) return 9;
+  if (cleanName.startsWith("nov")) return 10;
+  if (cleanName.startsWith("dec")) return 11;
+  return null;
+}
+
+function getNearestFutureOccurrence(day, monthIndex, baseDate) {
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Europe/Riga',
+    year: 'numeric'
+  });
+  const parts = formatter.formatToParts(baseDate);
+  const currentYear = parseInt(parts.find(p => p.type === 'year').value, 10);
+
+  const rigaDateStr = getRigaDateOffset(0, baseDate);
+  const [currY, currM, currD] = rigaDateStr.split('-').map(Number);
+  
+  let targetYear = currentYear;
+  if (monthIndex < (currM - 1) || (monthIndex === (currM - 1) && day < currD)) {
+    targetYear += 1;
+  }
+  
+  const targetMonthStr = String(monthIndex + 1).padStart(2, '0');
+  const targetDayStr = String(day).padStart(2, '0');
+  return `${targetYear}-${targetMonthStr}-${targetDayStr}`;
+}
+
+function resolveLatvianDate(date_text, baseDate = new Date()) {
+  if (!date_text) return null;
+  const clean = date_text.toLowerCase().trim();
+  
+  // 1. Relative dates
+  if (clean === "šodien" || clean === "šovakar") {
+    return getRigaDateOffset(0, baseDate);
+  }
+  if (clean === "rīt") {
+    return getRigaDateOffset(1, baseDate);
+  }
+  if (clean === "parīt") {
+    return getRigaDateOffset(2, baseDate);
+  }
+  
+  // 2. Format YYYY-MM-DD
+  let match = clean.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (match) {
+    const y = parseInt(match[1], 10);
+    const m = parseInt(match[2], 10);
+    const d = parseInt(match[3], 10);
+    if (m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+      return clean;
+    }
+  }
+
+  // 3. Format DD.MM.YYYY or DD/MM/YYYY or DD.MM.YY or DD/MM/YY
+  match = clean.match(/^(\d{1,2})[\.\/](\d{1,2})[\.\/](\d{2,4})$/);
+  if (match) {
+    const d = parseInt(match[1], 10);
+    const m = parseInt(match[2], 10);
+    let y = parseInt(match[3], 10);
+    if (match[3].length === 2) {
+      y += 2000;
+    }
+    if (m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+      return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    }
+  }
+
+  // 4. Format DD.MM or DD.MM. or DD/MM (no year)
+  match = clean.match(/^(\d{1,2})[\.\/](\d{1,2})\.?$/);
+  if (match) {
+    const d = parseInt(match[1], 10);
+    const m = parseInt(match[2], 10);
+    if (m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+      return getNearestFutureOccurrence(d, m - 1, baseDate);
+    }
+  }
+
+  // 5. Format DD. Month name (e.g. "4. augustā", "15. jūlijā", "2. septembrī", "4 augusts", etc.)
+  match = clean.match(/^(\d{1,2})\.?\s*([a-zA-ZāčēģīķļņšūžĀČĒĢĪĶĻŅŠŪŽ]+)\.?\s*(\d{4})?$/);
+  if (match) {
+    const d = parseInt(match[1], 10);
+    const monthStr = match[2];
+    const month = getMonthFromLatvianName(monthStr);
+    
+    if (month !== null && d >= 1 && d <= 31) {
+      if (match[3]) {
+        const y = parseInt(match[3], 10);
+        return `${y}-${String(month + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+      } else {
+        return getNearestFutureOccurrence(d, month, baseDate);
+      }
+    }
+  }
+
+  return null;
+}
+
+function resolveTime(time_text) {
+  if (!time_text) return null;
+  
+  let clean = time_text.toLowerCase().replace(/plkst\.?\s*/g, '').trim();
+  
+  const isPm = clean.includes("pm") || clean.includes("vakarā") || clean.includes("pēcpusdienā");
+  const isAm = clean.includes("am") || clean.includes("no rīta") || clean.includes("rīta");
+  clean = clean.replace(/(?:pm|am|vakarā|pēcpusdienā|no rīta|rīta)/g, '').trim();
+  
+  // 1. Matches HH:MM or HH:MM:SS
+  let match = clean.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (match) {
+    let h = parseInt(match[1], 10);
+    const m = match[2];
+    if (isPm && h < 12) h += 12;
+    if (isAm && h === 12) h = 0;
+    return `${String(h).padStart(2, '0')}:${m}`;
+  }
+  
+  // 2. Matches HH.MM (e.g. 18.00)
+  match = clean.match(/^(\d{1,2})\.(\d{2})$/);
+  if (match) {
+    let h = parseInt(match[1], 10);
+    const m = match[2];
+    if (isPm && h < 12) h += 12;
+    if (isAm && h === 12) h = 0;
+    return `${String(h).padStart(2, '0')}:${m}`;
+  }
+  
+  // 3. Matches just HH (e.g. "18" or "6")
+  match = clean.match(/^(\d{1,2})$/);
+  if (match) {
+    let h = parseInt(match[1], 10);
+    if (h >= 0 && h <= 23) {
+      if (isPm && h < 12) h += 12;
+      if (isAm && h === 12) h = 0;
+      return `${String(h).padStart(2, '0')}:00`;
+    }
+  }
+  
+  // 4. Fallback search inside the string
+  match = clean.match(/(\d{1,2})[:\.](\d{2})/);
+  if (match) {
+    let h = parseInt(match[1], 10);
+    const m = match[2];
+    if (isPm && h < 12) h += 12;
+    if (isAm && h === 12) h = 0;
+    return `${String(h).padStart(2, '0')}:${m}`;
+  }
+  
+  match = clean.match(/(\d{1,2})/);
+  if (match) {
+    let h = parseInt(match[1], 10);
+    if (h >= 0 && h <= 23) {
+      if (isPm && h < 12) h += 12;
+      if (isAm && h === 12) h = 0;
+      return `${String(h).padStart(2, '0')}:00`;
+    }
+  }
+  
+  return null;
+}
+
 async function extractReservationDetails(history) {
   if (!process.env.OPENAI_API_KEY) {
     throw new Error("OPENAI_API_KEY is not configured.");
   }
-
-  // Get current local time for date resolution context
-  const currentDateTime = new Date().toLocaleString("en-US", { timeZone: "Europe/Riga" });
 
   const messages = [
     {
@@ -144,9 +336,8 @@ async function extractReservationDetails(history) {
         "Nepieciešamā informācija ir:\n" +
         "1. Klienta vārds (customer_name) - jābūt tekstam.\n" +
         "2. Cilvēku/viesu skaits (guests) - jābūt veselam skaitlim (integer).\n" +
-        "3. Rezervācijas datums (reservation_date) - jābūt DATE formātā: YYYY-MM-DD. Ja klients raksta relatīvu datumu (piem., 'rīt' vai 'piektdien') vai nepilnu datumu (piem., '4. augustā'), pārvērt to reālā datumā formātā YYYY-MM-DD, izmantojot sniegto pašreizējo datumu/laiku.\n" +
-        "4. Rezervācijas laiks (reservation_time) - jābūt TIME formātā: HH:MM (24 stundu formāts, piemēram, 18:00 vai 19:30).\n\n" +
-        "Šodienas pašreizējais datums un laiks kontekstam: " + currentDateTime + ".\n\n" +
+        "3. Rezervācijas datums (date_text) - neapstrādāts teksts tieši tā, kā to minēja klients sarunā (piem., 'rīt', 'šovakar', 'parīt', '4. augustā', '04.08', '2026-08-04'). Neveic nekādus datumu aprēķinus vai pārvēršanu.\n" +
+        "4. Rezervācijas laiks (time_text) - neapstrādāts teksts tieši tā, kā to minēja klients sarunā (piem., 'plkst. 18:00', '18.00', '6pm', '18'). Neveic nekādu laika formāta labošanu vai aprēķinu.\n\n" +
         "Svarīgi noteikumi:\n" +
         "- Ja kāds no 4 parametriem trūkst vai klients vēl nav pabeidzis vai apstiprinājis rezervāciju sarunā (piem., asistents vēl nav apliecinājis, ka rezervācija ir pabeigta, vai klients vēl svārstās), laukam all_collected jābūt false un visiem pārējiem laukiem jābūt null.\n" +
         "- Tikai tad, kad visi 4 parametri ir skaidri zināmi, all_collected ir true."
@@ -171,10 +362,10 @@ async function extractReservationDetails(history) {
             all_collected: { type: "boolean" },
             customer_name: { type: ["string", "null"] },
             guests: { type: ["integer", "null"] },
-            reservation_date: { type: ["string", "null"] },
-            reservation_time: { type: ["string", "null"] }
+            date_text: { type: ["string", "null"] },
+            time_text: { type: ["string", "null"] }
           },
-          required: ["all_collected", "customer_name", "guests", "reservation_date", "reservation_time"],
+          required: ["all_collected", "customer_name", "guests", "date_text", "time_text"],
           additionalProperties: false
         }
       }
@@ -292,35 +483,42 @@ app.post("/sms", async (req, res) => {
         console.log("[Reservation] Extracted details:", extraction);
 
         if (extraction && extraction.all_collected) {
-          const { customer_name, guests, reservation_date, reservation_time } = extraction;
+          const { customer_name, guests, date_text, time_text } = extraction;
 
           // Double check that all 4 fields exist and are valid (not null/undefined/empty)
           if (
             customer_name != null &&
             guests != null &&
-            reservation_date != null &&
-            reservation_time != null
+            date_text != null &&
+            time_text != null
           ) {
-            console.log(`[Reservation] Creating reservation in database for name: ${customer_name}, phone: ${from}, guests: ${guests}, date: ${reservation_date}, time: ${reservation_time}...`);
-            
-            const result = await reservationService.createReservation({
-              phone_number: from,
-              customer_name,
-              guests,
-              reservation_date,
-              reservation_time
-            });
+            const resolvedDate = resolveLatvianDate(date_text);
+            const resolvedTime = resolveTime(time_text);
 
-            if (result.isNew) {
-              console.log(`[Reservation] Reservation created. ID: ${result.id}`);
-              console.log("[Reservation] Reservation data:", JSON.stringify(result.data, null, 2));
+            if (resolvedDate && resolvedTime) {
+              console.log(`[Reservation] Creating reservation in database for name: ${customer_name}, phone: ${from}, guests: ${guests}, date: ${resolvedDate}, time: ${resolvedTime}...`);
+              
+              const result = await reservationService.createReservation({
+                phone_number: from,
+                customer_name,
+                guests,
+                reservation_date: resolvedDate,
+                reservation_time: resolvedTime
+              });
+
+              if (result.isNew) {
+                console.log(`[Reservation] Reservation created. ID: ${result.id}`);
+                console.log("[Reservation] Reservation data:", JSON.stringify(result.data, null, 2));
+              } else {
+                console.log(`[Reservation] Duplicate reservation detected. Existing ID: ${result.id}`);
+              }
+
+              // Mark reservation as saved in the conversation state
+              await markReservationSaved(from);
+              console.log(`[Reservation] Flagged reservation_saved = true for phone: ${from}`);
             } else {
-              console.log(`[Reservation] Duplicate reservation detected. Existing ID: ${result.id}`);
+              console.log(`[Reservation] Extraction reported all_collected but date/time could not be resolved. date_text: "${date_text}" (resolved: ${resolvedDate}), time_text: "${time_text}" (resolved: ${resolvedTime}). Skipped saving.`);
             }
-
-            // Mark reservation as saved in the conversation state
-            await markReservationSaved(from);
-            console.log(`[Reservation] Flagged reservation_saved = true for phone: ${from}`);
           } else {
             console.log("[Reservation] Extraction reported all_collected but missing required fields. Skipped saving.");
           }
@@ -357,5 +555,8 @@ if (!process.env.VERCEL) {
     console.log("TWILIO_AUTH_TOKEN set:", !!process.env.TWILIO_AUTH_TOKEN);
   });
 }
+
+app.resolveLatvianDate = resolveLatvianDate;
+app.resolveTime = resolveTime;
 
 module.exports = app;
