@@ -94,15 +94,36 @@ async function isReservationSaved(phone) {
   return false;
 }
 
-async function saveHistory(phone, history, reservation_saved = false) {
+async function saveHistory(phone, history, reservation_saved = null, pending_cancellation = undefined) {
   const trimmed =
     history.length > MAX_HISTORY_MESSAGES
       ? history.slice(-MAX_HISTORY_MESSAGES)
       : history;
 
+  let currentSaved = false;
+  let currentPending = null;
+
+  if (redis) {
+    const stored = await redis.get(historyKey(phone));
+    if (stored && !Array.isArray(stored)) {
+      currentSaved = stored.reservation_saved || false;
+      currentPending = stored.pending_cancellation || null;
+    }
+  } else {
+    const stored = memoryStore.get(phone);
+    if (stored && !Array.isArray(stored)) {
+      currentSaved = stored.reservation_saved || false;
+      currentPending = stored.pending_cancellation || null;
+    }
+  }
+
+  const finalSaved = reservation_saved !== null ? reservation_saved : currentSaved;
+  const finalPending = pending_cancellation !== undefined ? pending_cancellation : currentPending;
+
   const data = {
     history: trimmed,
-    reservation_saved
+    reservation_saved: finalSaved,
+    pending_cancellation: finalPending
   };
 
   if (redis) {
@@ -126,6 +147,26 @@ async function addMessage(phone, role, content) {
 async function markReservationSaved(phone) {
   const history = await getHistory(phone);
   return saveHistory(phone, history, true);
+}
+
+async function getPendingCancellation(phone) {
+  if (redis) {
+    const stored = await redis.get(historyKey(phone));
+    if (stored && !Array.isArray(stored)) {
+      return stored.pending_cancellation || null;
+    }
+  } else {
+    const stored = memoryStore.get(phone);
+    if (stored && !Array.isArray(stored)) {
+      return stored.pending_cancellation || null;
+    }
+  }
+  return null;
+}
+
+async function setPendingCancellation(phone, reservationId) {
+  const history = await getHistory(phone);
+  return saveHistory(phone, history, null, reservationId);
 }
 
 function getRigaDateOffset(offsetDays = 0, baseDate = new Date()) {
@@ -454,6 +495,62 @@ app.post("/sms", async (req, res) => {
   }
 
   try {
+    const pendingCancellationId = await getPendingCancellation(from);
+    const cleanMsg = incomingMessage.toLowerCase().trim();
+
+    if (pendingCancellationId !== null) {
+      if (["jā", "ja", "yes", "ok", "apstiprinu"].includes(cleanMsg)) {
+        const reservation = await reservationService.findReservationById(pendingCancellationId);
+        if (reservation && reservation.phone_number === from) {
+          await reservationService.cancelReservation(pendingCancellationId);
+          console.log(`[Cancellation] Reservation cancelled`);
+          const reply = "Jūsu rezervācija ir veiksmīgi atcelta.";
+          await addMessage(from, "user", incomingMessage);
+          await addMessage(from, "assistant", reply);
+          await setPendingCancellation(from, null);
+          return sendTwiml(res, reply);
+        } else {
+          console.log(`[Cancellation] Cancellation failed: Reservation not found or phone number mismatch.`);
+          const reply = "Rezervācija netika atcelta.";
+          await addMessage(from, "user", incomingMessage);
+          await addMessage(from, "assistant", reply);
+          await setPendingCancellation(from, null);
+          return sendTwiml(res, reply);
+        }
+      } else if (["nē", "nee", "no"].includes(cleanMsg)) {
+        console.log(`[Cancellation] Cancellation declined`);
+        const reply = "Rezervācija netika atcelta.";
+        await addMessage(from, "user", incomingMessage);
+        await addMessage(from, "assistant", reply);
+        await setPendingCancellation(from, null);
+        return sendTwiml(res, reply);
+      } else {
+        const reply = "Lūdzu, atbildiet ar JĀ vai NĒ.";
+        await addMessage(from, "user", incomingMessage);
+        await addMessage(from, "assistant", reply);
+        return sendTwiml(res, reply);
+      }
+    }
+
+    if (["atcelt rezervāciju", "atcelt", "cancel reservation", "cancel"].includes(cleanMsg)) {
+      const reservation = await reservationService.findLatestActiveReservation(from);
+      if (reservation) {
+        console.log(`[Cancellation] Reservation found`);
+        await setPendingCancellation(from, reservation.id);
+        console.log(`[Cancellation] Awaiting confirmation`);
+        const reply = `Vai tiešām vēlaties atcelt rezervāciju ${reservation.guests} cilvēkiem ${reservation.reservation_date} plkst. ${reservation.reservation_time} uz vārda ${reservation.customer_name}? Atbildiet JĀ vai NĒ.`;
+        await addMessage(from, "user", incomingMessage);
+        await addMessage(from, "assistant", reply);
+        return sendTwiml(res, reply);
+      } else {
+        console.log(`[Cancellation] No active reservation found`);
+        const reply = "Jums nav aktīvu rezervāciju.";
+        await addMessage(from, "user", incomingMessage);
+        await addMessage(from, "assistant", reply);
+        return sendTwiml(res, reply);
+      }
+    }
+
     const aiReply = await getAiReply(from, incomingMessage);
     console.log("[POST /sms] OpenAI reply:", aiReply);
 
@@ -559,5 +656,7 @@ if (!process.env.VERCEL) {
 
 app.resolveLatvianDate = resolveLatvianDate;
 app.resolveTime = resolveTime;
+app.getPendingCancellation = getPendingCancellation;
+app.setPendingCancellation = setPendingCancellation;
 
 module.exports = app;

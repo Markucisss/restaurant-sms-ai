@@ -79,7 +79,65 @@ async function createReservation(reservationData) {
   };
 }
 
+async function findLatestActiveReservation(phone_number) {
+  if (!supabase) {
+    throw new Error("Supabase client is not initialized. Check your environment variables.");
+  }
+  const { data, error } = await supabase
+    .from("reservations")
+    .select("id, customer_name, phone_number, guests, reservation_date, reservation_time, status")
+    .eq("phone_number", phone_number)
+    .eq("status", "confirmed")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    console.error("[Supabase] Error finding active reservation:", error);
+    throw error;
+  }
+  return data;
+}
+
+async function cancelReservation(reservationId) {
+  if (!supabase) {
+    throw new Error("Supabase client is not initialized. Check your environment variables.");
+  }
+  const { data, error } = await supabase
+    .from("reservations")
+    .update({ status: "cancelled", updated_at: new Date().toISOString() })
+    .eq("id", reservationId)
+    .select()
+    .single();
+
+  if (error) {
+    console.error("[Supabase] Error cancelling reservation:", error);
+    throw error;
+  }
+  return data;
+}
+
+async function findReservationById(id) {
+  if (!supabase) {
+    throw new Error("Supabase client is not initialized. Check your environment variables.");
+  }
+  const { data, error } = await supabase
+    .from("reservations")
+    .select("*")
+    .eq("id", id)
+    .maybeSingle();
+
+  if (error) {
+    console.error("[Supabase] Error finding reservation by ID:", error);
+    throw error;
+  }
+  return data;
+}
+
 module.exports = {
   createReservation,
+  findLatestActiveReservation,
+  cancelReservation,
+  findReservationById,
   supabaseClient: supabase
 };
