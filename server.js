@@ -194,15 +194,16 @@ function resolveLatvianDate(date_text, baseDate = new Date()) {
   if (!date_text) return null;
   const clean = date_text.toLowerCase().trim();
   
-  // 1. Relative dates
-  if (clean === "šodien" || clean === "šovakar") {
-    return getRigaDateOffset(0, baseDate);
+  // 1. Relative dates using includes()
+  // NOTE: "parīt" contains "rīt", so check "parīt" first.
+  if (clean.includes("parīt")) {
+    return getRigaDateOffset(2, baseDate);
   }
-  if (clean === "rīt") {
+  if (clean.includes("rīt")) {
     return getRigaDateOffset(1, baseDate);
   }
-  if (clean === "parīt") {
-    return getRigaDateOffset(2, baseDate);
+  if (clean.includes("šodien") || clean.includes("šovakar")) {
+    return getRigaDateOffset(0, baseDate);
   }
   
   // 2. Format YYYY-MM-DD
